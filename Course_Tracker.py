@@ -4,7 +4,6 @@ import pandas as pd
 import datetime as dt
 import hashlib
 from pathlib import Path
-import plotly.express as px
 import plotly.graph_objects as go
 
 # ================== Dosyalar ==================
@@ -33,7 +32,6 @@ def save_users(df: pd.DataFrame):
 def load_attendance():
     if ATTENDANCE_DB.exists():
         df = pd.read_csv(ATTENDANCE_DB)
-        # 'date' her ne formatta gelirse gelsin datetime'a çevir
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=False)
         return df
@@ -72,7 +70,7 @@ def timetable_grid_figure(schedule_df: pd.DataFrame, title: str = "Haftalık Pro
             zeroline=False,
         ),
         yaxis=dict(
-            range=[HOUR_END, HOUR_START],         # 08:00 üstte
+            range=[HOUR_END, HOUR_START],
             tick0=HOUR_START,
             dtick=1,
             tickformat="02d:00",
@@ -103,7 +101,6 @@ def timetable_grid_figure(schedule_df: pd.DataFrame, title: str = "Haftalık Pro
 
         c = color_map.setdefault(r["course"], palette[len(color_map) % len(palette)])
 
-        # blok
         fig.add_shape(
             type="rect",
             x0=x - 0.45, x1=x + 0.45,
@@ -112,7 +109,6 @@ def timetable_grid_figure(schedule_df: pd.DataFrame, title: str = "Haftalık Pro
             fillcolor=c,
             opacity=0.88,
         )
-        # etiket
         fig.add_annotation(
             x=x, y=(y0 + y1) / 2,
             text=f"{r['course']}<br>{r['start']}–{r['end']}",
@@ -166,7 +162,7 @@ def dashboard(username: str):
     if st.sidebar.button("Çıkış Yap"):
         st.session_state.clear(); st.rerun()
 
-    menu = ["Ders Programı", "Katılım İşaretle", "İstatistikler"]
+    menu = ["Ders Programı", "Katılım İşaretle", "İstatistikler", "Sıralama"]
     choice = st.sidebar.radio("Menü", menu)
 
     schedule_df = load_schedule()
@@ -175,7 +171,7 @@ def dashboard(username: str):
 
     # -------- Ders Programı --------
     if choice == "Ders Programı":
-        st.header("Ders Programı Ekle / Gör")
+        st.header("Ders Programı Ekle / Gör / Sil")
         with st.form("add_course", clear_on_submit=True):
             course = st.text_input("Ders Adı")
             day = st.selectbox("Gün", DAYS_TR)
@@ -203,6 +199,19 @@ def dashboard(username: str):
                 st.success("Ders eklendi.")
                 st.rerun()
 
+        # Ders silme
+        if not my_sched.empty:
+            st.subheader("Ders Sil")
+            del_course = st.selectbox("Silmek istediğiniz ders", my_sched["course"].unique())
+            if st.button("Sil"):
+                schedule_df = schedule_df[~(
+                    (schedule_df["username"] == username) &
+                    (schedule_df["course"] == del_course)
+                )]
+                save_schedule(schedule_df)
+                st.success(f"{del_course} silindi.")
+                st.rerun()
+
         my_sched = schedule_df[schedule_df["username"] == username].copy()
         fig = timetable_grid_figure(my_sched, "Haftalık Program")
         st.plotly_chart(fig, use_container_width=True)
@@ -218,7 +227,7 @@ def dashboard(username: str):
         st.plotly_chart(fig, use_container_width=True)
 
         sel_date = st.date_input("Tarih", value=dt.date.today())
-        weekday = sel_date.weekday()       # 0=Mon
+        weekday = sel_date.weekday()  # 0=Mon
         if weekday > 4:
             st.info("Hafta içi program gösteriliyor.")
         weekday_tr = DAYS_TR[min(weekday, 4)]
@@ -239,7 +248,6 @@ def dashboard(username: str):
                 already = not my_att_today[my_att_today["course"] == r["course"]].empty
                 checked = st.checkbox(label, value=already, key=f"att_{username}_{r['course']}_{sel_date}")
 
-                # değişim yakala
                 if checked and not already:
                     add = pd.DataFrame([{
                         "username": username,
@@ -256,20 +264,59 @@ def dashboard(username: str):
                         (attendance_df["course"] == r["course"]) &
                         (_att_dates == sel_date)
                     )]
-
                     save_attendance(attendance_df)
                     st.toast(f"{r['course']} katılımı silindi.")
 
     # -------- İstatistikler --------
-    else:
+    elif choice == "İstatistikler":
         st.header("Katılım İstatistikleri")
         my_att = attendance_df[attendance_df["username"] == username].copy()
         if my_att.empty:
             st.info("Katılım verisi yok.")
         else:
+            # toplam ders sayısı = haftalık ders * geçen hafta sayısı
+            all_courses = my_sched.copy()
+            if all_courses.empty:
+                st.info("Önce program ekleyin.")
+                return
+
+            min_date = attendance_df["date"].min()
+            max_date = attendance_df["date"].max()
+            weeks = ((max_date - min_date).days // 7) + 1 if pd.notna(max_date) else 1
+
+            possible_total = len(all_courses) * weeks
+            actual_total = my_att["date"].nunique()
+            percentage = (actual_total / possible_total * 100) if possible_total > 0 else 0
+
             summary = my_att.groupby("course").date.nunique().reset_index(name="Katılım Sayısı")
             st.dataframe(summary, use_container_width=True)
-            st.metric("Toplam Katılım", int(summary["Katılım Sayısı"].sum()))
+            st.metric("Toplam Katılım", int(actual_total))
+            st.metric("Katılım Oranı", f"{percentage:.1f}%")
+
+    # -------- Sıralama --------
+    else:
+        st.header("Genel Sıralama")
+        all_sched = load_schedule()
+        all_att = load_attendance()
+        if all_sched.empty or all_att.empty:
+            st.info("Henüz veri yok.")
+            return
+
+        min_date = all_att["date"].min()
+        max_date = all_att["date"].max()
+        weeks = ((max_date - min_date).days // 7) + 1 if pd.notna(max_date) else 1
+
+        results = []
+        for user in all_sched["username"].unique():
+            user_sched = all_sched[all_sched["username"] == user]
+            user_att = all_att[all_att["username"] == user]
+            possible = len(user_sched) * weeks
+            actual = user_att["date"].nunique()
+            perc = (actual / possible * 100) if possible > 0 else 0
+            results.append({"Kullanıcı": user, "Toplam Katılım": actual, "Oran %": round(perc, 1)})
+
+        ranking = pd.DataFrame(results).sort_values("Oran %", ascending=False)
+        st.dataframe(ranking, use_container_width=True)
 
 # ================== Main ==================
 st.set_page_config(page_title="Ders Katılım", layout="wide")
