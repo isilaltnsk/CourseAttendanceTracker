@@ -5,7 +5,6 @@ import datetime as dt
 import hashlib
 from pathlib import Path
 import plotly.graph_objects as go
-import subprocess
 
 # ================== Dosyalar ==================
 USER_DB = Path("users.csv")
@@ -15,55 +14,8 @@ SCHEDULE_DB = Path("schedule.csv")
 # ================== Sabitler ==================
 DAYS_TR = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma"]
 DAY_IDX = {d: i for i, d in enumerate(DAYS_TR)}
-HOUR_START = 8   # 08:00
-HOUR_END   = 19  # 19:00
-
-# ================== GitHub Push (güvenli kontrol + branch tespiti) ==================
-def push_to_github(commit_message="Veriler güncellendi"):
-    """
-    Eğer st.secrets içinde GITHUB_REPO ve GITHUB_TOKEN varsa:
-    - git status kontrolü yapar, değişiklik varsa add/commit/push yapar.
-    - mevcut branch'i tespit edip o branch'e pushlar.
-    - secrets yoksa fonksiyon sessizce döner (local çalışmada sorun çıkarmaz).
-    """
-    try:
-        repo = st.secrets.get("GITHUB_REPO")
-        token = st.secrets.get("GITHUB_TOKEN")
-        email = st.secrets.get("GITHUB_EMAIL")
-        name = st.secrets.get("GITHUB_NAME")
-
-        if not repo or not token:
-            # Secrets eksikse push yapma
-            return
-
-        # Git kullanıcı ayarları (opsiyonel)
-        if email:
-            subprocess.run(["git", "config", "user.email", email], check=False)
-        if name:
-            subprocess.run(["git", "config", "user.name", name], check=False)
-
-        # Değişiklik var mı kontrolü
-        status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, check=False)
-        if not status.stdout.strip():
-            # Değişiklik yok
-            return
-
-        # Add & commit
-        subprocess.run(["git", "add", "."], check=True)
-        subprocess.run(["git", "commit", "-m", commit_message], check=False)
-
-        # Mevcut branch'i al
-        br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, check=False)
-        branch = br.stdout.strip() if br.returncode == 0 and br.stdout.strip() else "main"
-
-        # Push (token'ı URL içinde kullanalım)
-        repo_url = f"https://{token}@github.com/{repo}.git"
-        subprocess.run(["git", "push", repo_url, f"HEAD:{branch}"], check=True)
-
-        st.toast("Değişiklikler GitHub'a pushlandı ✅")
-    except Exception as e:
-        # Hata göster ama token veya hassas veri yazma
-        st.warning(f"GitHub push sırasında hata: {e}")
+HOUR_START = 8
+HOUR_END   = 19
 
 # ================== Yardımcılar ==================
 def hash_password(p: str) -> str:
@@ -76,19 +28,17 @@ def load_users():
 
 def save_users(df: pd.DataFrame):
     df.to_csv(USER_DB, index=False)
-    push_to_github("Kullanıcı listesi güncellendi")
 
 def load_attendance():
     if ATTENDANCE_DB.exists():
         df = pd.read_csv(ATTENDANCE_DB)
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=False)
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
     return pd.DataFrame(columns=["username", "course", "date"])
 
 def save_attendance(df: pd.DataFrame):
     df.to_csv(ATTENDANCE_DB, index=False)
-    push_to_github("Katılım verisi güncellendi")
 
 def load_schedule():
     if SCHEDULE_DB.exists():
@@ -97,7 +47,6 @@ def load_schedule():
 
 def save_schedule(df: pd.DataFrame):
     df.to_csv(SCHEDULE_DB, index=False)
-    push_to_github("Ders programı güncellendi")
 
 def _time_to_hours(hhmm: str) -> float:
     hh, mm = hhmm.split(":")
@@ -211,8 +160,7 @@ def login_ui():
 def dashboard(username: str):
     st.sidebar.write(f"Hoş geldin, **{username}**")
     if st.sidebar.button("Çıkış Yap"):
-        st.session_state.clear()
-        st.rerun()
+        st.session_state.clear(); st.rerun()
 
     menu = ["Ders Programı", "Katılım İşaretle", "İstatistikler", "Sıralama"]
     choice = st.sidebar.radio("Menü", menu)
@@ -252,12 +200,10 @@ def dashboard(username: str):
                 st.rerun()
 
         # Ders silme
-        my_sched = schedule_df[schedule_df["username"] == username].copy()
         if not my_sched.empty:
             st.subheader("Ders Sil")
             del_course = st.selectbox("Silmek istediğiniz ders", my_sched["course"].unique())
             if st.button("Sil"):
-                # schedule'dan ilgili satırları kaldır
                 schedule_df = schedule_df[~(
                     (schedule_df["username"] == username) &
                     (schedule_df["course"] == del_course)
@@ -281,7 +227,7 @@ def dashboard(username: str):
         st.plotly_chart(fig, use_container_width=True)
 
         sel_date = st.date_input("Tarih", value=dt.date.today())
-        weekday = sel_date.weekday()  # 0=Mon
+        weekday = sel_date.weekday()
         if weekday > 4:
             st.info("Hafta içi program gösteriliyor.")
         weekday_tr = DAYS_TR[min(weekday, 4)]
@@ -293,8 +239,7 @@ def dashboard(username: str):
             st.write(f"{weekday_tr} dersleri:")
             _att_dates = pd.to_datetime(attendance_df["date"], errors="coerce").dt.date
             my_att_today = attendance_df[
-                (attendance_df["username"] == username) &
-                (_att_dates == sel_date)
+                (attendance_df["username"] == username) & (_att_dates == sel_date)
             ]
 
             for _, r in todays.iterrows():
@@ -327,60 +272,38 @@ def dashboard(username: str):
         my_att = attendance_df[attendance_df["username"] == username].copy()
         if my_att.empty:
             st.info("Katılım verisi yok.")
-        else:
-            all_courses = my_sched.copy()
-            if all_courses.empty:
-                st.info("Önce program ekleyin.")
-                return
+            return
 
-            # hafta sayısı: tüm attendance tablosunun tarih aralığına göre (en geniş dönem)
-            min_date = attendance_df["date"].min()
-            max_date = attendance_df["date"].max()
-            if pd.isna(min_date) or pd.isna(max_date):
-                weeks = 1
-            else:
-                weeks = max(1, ((max_date - min_date).days // 7) + 1)
+        # toplam ders sayısı ve katılım
+        total_possible = len(my_sched)  # toplam ders sayısı
+        total_attended = len(my_att)    # toplam katılım sayısı (ders bazlı)
 
-            # mümkün toplam = haftalık program satır sayısı * geçen hafta sayısı
-            possible_total = len(all_courses) * weeks
+        percentage = (total_attended / total_possible * 100) if total_possible > 0 else 0
 
-            # gerçek toplam: (course, date) benzersiz kayıt sayısı
-            actual_total = len(my_att.drop_duplicates(subset=["course", "date"]))
-
-            percentage = (actual_total / possible_total * 100) if possible_total > 0 else 0
-
-            summary = my_att.groupby("course").date.nunique().reset_index(name="Katılım Sayısı")
-            st.dataframe(summary, use_container_width=True)
-            st.metric("Toplam Katılım (benzersiz ders-gün)", int(actual_total))
-            st.metric("Katılım Oranı", f"{percentage:.1f}%")
+        summary = my_att.groupby("course").date.nunique().reset_index(name="Katılım Sayısı")
+        st.dataframe(summary, use_container_width=True)
+        st.metric("Toplam Katılım", int(total_attended))
+        st.metric("Katılım Oranı", f"{percentage:.1f}%")
 
     # -------- Sıralama --------
     else:
         st.header("Genel Sıralama")
         all_sched = load_schedule()
         all_att = load_attendance()
-        if all_sched.empty:
-            st.info("Henüz ders programı verisi yok.")
+        if all_sched.empty or all_att.empty:
+            st.info("Henüz veri yok.")
             return
-
-        # haftaları attendance tarih aralığına göre hesapla (tüm kullanıcılar için)
-        min_date = all_att["date"].min() if not all_att.empty else None
-        max_date = all_att["date"].max() if not all_att.empty else None
-        if pd.isna(min_date) or pd.isna(max_date):
-            weeks = 1
-        else:
-            weeks = max(1, ((max_date - min_date).days // 7) + 1)
 
         results = []
         for user in all_sched["username"].unique():
             user_sched = all_sched[all_sched["username"] == user]
             user_att = all_att[all_att["username"] == user]
-            possible = len(user_sched) * weeks
-            actual = len(user_att.drop_duplicates(subset=["course", "date"]))
-            perc = (actual / possible * 100) if possible > 0 else 0
-            results.append({"Kullanıcı": user, "Toplam Katılım": int(actual), "Oran %": round(perc, 1)})
+            total_possible = len(user_sched)
+            total_attended = len(user_att)
+            perc = (total_attended / total_possible * 100) if total_possible > 0 else 0
+            results.append({"Kullanıcı": user, "Toplam Katılım": total_attended, "Oran %": round(perc, 1)})
 
-        ranking = pd.DataFrame(results).sort_values("Oran %", ascending=False).reset_index(drop=True)
+        ranking = pd.DataFrame(results).sort_values("Oran %", ascending=False)
         st.dataframe(ranking, use_container_width=True)
 
 # ================== Main ==================
