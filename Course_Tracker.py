@@ -5,6 +5,8 @@ import datetime as dt
 import hashlib
 from pathlib import Path
 import plotly.graph_objects as go
+
+# GitHub push
 from github import Github
 
 # ================== Dosyalar ==================
@@ -30,43 +32,19 @@ def load_users():
 
 def save_users(df: pd.DataFrame):
     df.to_csv(USER_DB, index=False)
+    push_to_github(USER_DB)
 
 def load_attendance():
     if ATTENDANCE_DB.exists():
         df = pd.read_csv(ATTENDANCE_DB)
         if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=False)
         return df
     return pd.DataFrame(columns=["username", "course", "date"])
 
-def push_to_github_csv(df: pd.DataFrame, path_in_repo: str):
-    """GitHub API ile CSV push"""
-    token = st.secrets["GITHUB_TOKEN"]
-    repo_name = st.secrets["GITHUB_REPO"]
-    branch = st.secrets.get("GITHUB_BRANCH", "main")
-    g = Github(token)
-    repo = g.get_repo(repo_name)
-    csv_str = df.to_csv(index=False)
-    try:
-        content_file = repo.get_contents(path_in_repo, ref=branch)
-        repo.update_file(path_in_repo,
-                         "Update via Streamlit",
-                         csv_str,
-                         content_file.sha,
-                         branch=branch)
-    except:
-        repo.create_file(path_in_repo,
-                         "Create via Streamlit",
-                         csv_str,
-                         branch=branch)
-
 def save_attendance(df: pd.DataFrame):
-    df.to_csv(ATTENDANCE_DB, index=False)  # Lokal kaydet
-    try:
-        push_to_github_csv(df, "attendance.csv")
-        st.toast("Push tetiklendi ve GitHub'a gönderildi.")
-    except Exception as e:
-        st.error(f"GitHub push sırasında hata oluştu: {e}")
+    df.to_csv(ATTENDANCE_DB, index=False)
+    push_to_github(ATTENDANCE_DB)
 
 def load_schedule():
     if SCHEDULE_DB.exists():
@@ -75,10 +53,32 @@ def load_schedule():
 
 def save_schedule(df: pd.DataFrame):
     df.to_csv(SCHEDULE_DB, index=False)
+    push_to_github(SCHEDULE_DB)
 
 def _time_to_hours(hhmm: str) -> float:
     hh, mm = hhmm.split(":")
     return int(hh) + int(mm) / 60
+
+# ================== GitHub Push ==================
+def push_to_github(file_path: Path):
+    try:
+        token = st.secrets["GITHUB_TOKEN"]
+        repo_name = st.secrets["GITHUB_REPO"]
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        # Dosya içeriğini oku
+        content = file_path.read_text()
+        # GitHub dosya yolunu repo içinde aynı isimle al
+        git_file_path = file_path.name
+        try:
+            contents = repo.get_contents(git_file_path)
+            repo.update_file(contents.path, f"Update {git_file_path}", content, contents.sha)
+        except:
+            # Eğer dosya yoksa oluştur
+            repo.create_file(git_file_path, f"Create {git_file_path}", content)
+        st.toast(f"Push tetiklendi ve GitHub'a gönderildi: {file_path.name}")
+    except Exception as e:
+        st.error(f"GitHub push sırasında hata oluştu: {e}")
 
 # ================== Takvim: grid görünümü ==================
 def timetable_grid_figure(schedule_df: pd.DataFrame, title: str = "Haftalık Program"):
@@ -144,12 +144,12 @@ def timetable_grid_figure(schedule_df: pd.DataFrame, title: str = "Haftalık Pro
             font=dict(color="white", size=12),
             xanchor="center", yanchor="middle",
         )
-
     return fig
 
 # ================== Giriş/Kayıt ==================
 def login_ui():
     st.title("Ders Katılım Takip Sistemi")
+
     tab1, tab2 = st.tabs(["Giriş Yap", "Kayıt Ol"])
 
     with tab2:
@@ -259,38 +259,38 @@ def dashboard(username: str):
             st.info("Hafta içi program gösteriliyor.")
         weekday_tr = DAYS_TR[min(weekday, 4)]
 
+        # Bugüne kadar olan tüm dersleri al
+        past_days = pd.date_range(SCHOOL_START, sel_date)
+        past_sched = my_sched[my_sched['day'].isin([DAYS_TR[d.weekday()] for d in past_days if d.weekday() < 5])]
+
         todays = my_sched[my_sched["day"] == weekday_tr].sort_values("start")
-        if todays.empty:
-            st.info(f"{weekday_tr} günü ders yok.")
-        else:
-            st.write(f"{weekday_tr} dersleri:")
-            _att_dates = pd.to_datetime(attendance_df["date"], errors="coerce").dt.date
-            my_att_today = attendance_df[
-                (attendance_df["username"] == username) &
-                (_att_dates == sel_date)
-            ]
+        _att_dates = pd.to_datetime(attendance_df["date"], errors="coerce").dt.date
+        my_att_today = attendance_df[
+            (attendance_df["username"] == username) & (_att_dates == sel_date)
+        ]
 
-            for _, r in todays.iterrows():
-                label = f"{r['course']}  {r['start']}-{r['end']}"
-                already = not my_att_today[my_att_today["course"] == r["course"]].empty
-                checked = st.checkbox(label, value=already, key=f"att_{username}_{r['course']}_{sel_date}")
+        for _, r in todays.iterrows():
+            label = f"{r['course']}  {r['start']}-{r['end']}"
+            already = not my_att_today[my_att_today["course"] == r["course"]].empty
+            checked = st.checkbox(label, value=already, key=f"att_{username}_{r['course']}_{sel_date}")
 
-                if checked and not already:
-                    add = pd.DataFrame([{
-                        "username": username,
-                        "course": r["course"],
-                        "date": pd.to_datetime(sel_date),
-                    }])
-                    attendance_df = pd.concat([attendance_df, add], ignore_index=True)
-                    save_attendance(attendance_df)
-                elif not checked and already:
-                    _att_dates = pd.to_datetime(attendance_df["date"], errors="coerce").dt.date
-                    attendance_df = attendance_df[~(
-                        (attendance_df["username"] == username) &
-                        (attendance_df["course"] == r["course"]) &
-                        (_att_dates == sel_date)
-                    )]
-                    save_attendance(attendance_df)
+            if checked and not already:
+                add = pd.DataFrame([{
+                    "username": username,
+                    "course": r["course"],
+                    "date": pd.to_datetime(sel_date),
+                }])
+                attendance_df = pd.concat([attendance_df, add], ignore_index=True)
+                save_attendance(attendance_df)
+                st.toast(f"{r['course']} için katılım kaydedildi.")
+            elif not checked and already:
+                attendance_df = attendance_df[~(
+                    (attendance_df["username"] == username) &
+                    (attendance_df["course"] == r["course"]) &
+                    (_att_dates == sel_date)
+                )]
+                save_attendance(attendance_df)
+                st.toast(f"{r['course']} katılımı silindi.")
 
     # -------- İstatistikler --------
     elif choice == "İstatistikler":
@@ -299,33 +299,16 @@ def dashboard(username: str):
         if my_att.empty:
             st.info("Katılım verisi yok.")
         else:
-            all_courses = my_sched.copy()
-            if all_courses.empty:
-                st.info("Önce program ekleyin.")
-                return
-
-            # Bugüne kadar derslerin kaçına katıldın
-            today = dt.date.today()
-            attended = my_att[my_att["date"].dt.date <= today]
-            attended_count = len(attended)
-
-            # Bugüne kadar toplam olası ders sayısı
-            # haftaları okul başlangıcından bugüne kadar al
-            total_count = 0
-            current = SCHOOL_START
-            while current <= today:
-                weekday_idx = current.weekday()
-                if weekday_idx <= 4:
-                    day_name = DAYS_TR[weekday_idx]
-                    total_count += len(all_courses[all_courses["day"] == day_name])
-                current += dt.timedelta(days=1)
-
-            percentage = (attended_count / total_count * 100) if total_count > 0 else 0
-
-            summary = attended.groupby("course").date.nunique().reset_index(name="Katılım Sayısı")
+            # Bugüne kadar olan tüm dersler
+            past_days = pd.date_range(SCHOOL_START, dt.date.today())
+            past_sched = my_sched[my_sched['day'].isin([DAYS_TR[d.weekday()] for d in past_days if d.weekday() < 5])]
+            total_lessons = len(past_sched)
+            attended = len(my_att)
+            perc = (attended / total_lessons * 100) if total_lessons > 0 else 0
+            st.metric("Toplam Katılım", attended)
+            st.metric("Katılım Oranı", f"{perc:.1f}%")
+            summary = my_att.groupby("course").date.nunique().reset_index(name="Katılım Sayısı")
             st.dataframe(summary, use_container_width=True)
-            st.metric("Toplam Katılım", int(attended_count))
-            st.metric("Katılım Oranı", f"{percentage:.1f}%")
 
     # -------- Sıralama --------
     else:
@@ -336,27 +319,16 @@ def dashboard(username: str):
             st.info("Henüz veri yok.")
             return
 
-        today = dt.date.today()
+        past_days = pd.date_range(SCHOOL_START, dt.date.today())
         results = []
         for user in all_sched["username"].unique():
             user_sched = all_sched[all_sched["username"] == user]
             user_att = all_att[all_att["username"] == user]
-            # bugüne kadar katılım
-            attended = user_att[user_att["date"].dt.date <= today]
-            attended_count = len(attended)
-
-            # bugüne kadar olası ders sayısı
-            total_count = 0
-            current = SCHOOL_START
-            while current <= today:
-                weekday_idx = current.weekday()
-                if weekday_idx <= 4:
-                    day_name = DAYS_TR[weekday_idx]
-                    total_count += len(user_sched[user_sched["day"] == day_name])
-                current += dt.timedelta(days=1)
-
-            perc = (attended_count / total_count * 100) if total_count > 0 else 0
-            results.append({"Kullanıcı": user, "Toplam Katılım": attended_count, "Oran %": round(perc, 1)})
+            past_user_sched = user_sched[user_sched['day'].isin([DAYS_TR[d.weekday()] for d in past_days if d.weekday() < 5])]
+            total = len(past_user_sched)
+            attended = len(user_att)
+            perc = (attended / total * 100) if total > 0 else 0
+            results.append({"Kullanıcı": user, "Toplam Katılım": attended, "Oran %": round(perc, 1)})
 
         ranking = pd.DataFrame(results).sort_values("Oran %", ascending=False)
         st.dataframe(ranking, use_container_width=True)
